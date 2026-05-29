@@ -1,0 +1,34 @@
+{
+  "name": "cc-statusline-simple",
+  "version": "0.1.1",
+  "description": "Minimal Claude Code status line: model-aware context %, cost, git status. No pets.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "statusline",
+    "status-line",
+    "anthropic"
+  ],
+  "license": "MIT",
+  "author": "ihainan",
+  "repository": "github:ihainan/cc-statusline",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "cc-statusline": "dist/cli.js"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/cli.js --minify --banner:js=\"#!/usr/bin/env node\"",
+    "watch": "npm run build -- --watch",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
