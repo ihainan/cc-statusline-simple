@@ -23,22 +23,31 @@ Color thresholds on the `Ctx` value: green < 50% (usable), cyan < 80%, yellow < 
 ## Install
 
 ```bash
-git clone <this repo>
-cd claude-statusline
-npm install
-npm run build
+npm install -g cc-statusline-simple
 ```
 
-Point `~/.claude/settings.json` at the built CLI:
+Then point `~/.claude/settings.json` at the `cc-statusline` command:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "node /absolute/path/to/claude-statusline/dist/cli.js",
+    "command": "cc-statusline",
     "padding": 0
   }
 }
+```
+
+Restart Claude Code (or open a new session) for the status line to appear.
+
+### From source
+
+```bash
+git clone https://github.com/ihainan/cc-statusline-simple.git
+cd cc-statusline-simple
+npm install
+npm run build
+# then set "command": "node /absolute/path/to/cc-statusline-simple/dist/cli.js"
 ```
 
 ## Verify
