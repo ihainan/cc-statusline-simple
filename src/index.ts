@@ -16,6 +16,7 @@ import { join } from "node:path";
  * Only the fields we actually consume are typed.
  */
 interface StatusInput {
+  session_id?: string;
   transcript_path?: string;
   cwd?: string;
   model?: { id?: string; display_name?: string };
@@ -219,7 +220,7 @@ function toEpochSeconds(v: number | string | undefined): number | null {
 function normalizeWindow(w: RateWindow | undefined): WindowState | null {
   if (!w) return null;
   const used = typeof w.used_percentage === "number" && Number.isFinite(w.used_percentage)
-    ? w.used_percentage
+    ? Math.round(w.used_percentage * 100) / 100 // drop float noise like 7.000000000000001
     : null;
   const resetsAtEpoch = toEpochSeconds(w.resets_at);
   // A window with no usable data at all is treated as absent.
@@ -243,6 +244,14 @@ function readRateLimits(input: StatusInput): UsageState {
     fiveHour: normalizeWindow(rl?.five_hour ?? rl?.session),
     weekly: normalizeWindow(rl?.seven_day ?? rl?.weekly),
   };
+}
+
+// A window whose reset time has already passed is a stale cached snapshot:
+// Claude Code hands the status line the rate_limits from this session's last
+// API response, so a long-idle session reports a window that already reset.
+// Such data must not be shown or persisted.
+function isStale(w: WindowState | null, nowSec: number): boolean {
+  return w != null && w.resetsAtEpoch != null && w.resetsAtEpoch <= nowSec;
 }
 
 // Compact "time until reset" from now, e.g. 45m, 2h13m, 3d4h.
@@ -269,7 +278,7 @@ function quotaColor(remaining: number | null): string {
 }
 
 function formatWindowSegment(label: string, w: WindowState | null, nowSec: number): string | null {
-  if (!w) return null;
+  if (!w || isStale(w, nowSec)) return null;
   const col = quotaColor(w.remaining);
   const pct = w.remaining == null ? "?" : `${w.remaining.toFixed(0)}%`;
   const reset = formatResetIn(w.resetsAtEpoch, nowSec);
@@ -277,65 +286,110 @@ function formatWindowSegment(label: string, w: WindowState | null, nowSec: numbe
   return `${C.dim}${label}${C.reset} ${col}${pct}${C.reset}${tail}`;
 }
 
+// Serialized form of a window for the on-disk records.
+type WindowRecord = {
+  used_percentage: number | null;
+  remaining_percentage: number | null;
+  resets_at_epoch: number | null;
+  resets_at_raw: number | string | null;
+  resets_in_seconds: number | null;
+} | null;
+
+function serializeWindow(w: WindowState | null, nowSec: number): WindowRecord {
+  if (!w) return null;
+  return {
+    used_percentage: w.used,
+    remaining_percentage: w.remaining,
+    resets_at_epoch: w.resetsAtEpoch,
+    resets_at_raw: w.resetsAtRaw,
+    resets_in_seconds: w.resetsAtEpoch == null ? null : w.resetsAtEpoch - nowSec,
+  };
+}
+
+function lastJsonlRecord(path: string): any | null {
+  if (!existsSync(path)) return null;
+  try {
+    const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim());
+    if (lines.length === 0) return null;
+    return JSON.parse(lines[lines.length - 1]);
+  } catch {
+    return null;
+  }
+}
+
 // Persist usage so it can be analyzed outside the status line.
-//   <dir>/usage.json  — latest snapshot (overwritten atomically each run)
-//   <dir>/usage.jsonl — one line appended only when the numbers change
+//   <dir>/usage.json            — global "current" snapshot; per window the
+//                                 freshest non-stale value wins, so a long-idle
+//                                 session can never clobber an active one.
+//   <dir>/usage-<session>.jsonl — per-session change history (no cross-session
+//                                 races or interleaving), the durable series.
+// rate_limits is account-global, but each session reports it as of its own last
+// API response — so we drop stale windows and isolate history per session.
 // Never throws: persistence must not break the status line.
-function persistUsage(state: UsageState, nowSec: number): void {
-  if (!state.fiveHour && !state.weekly) return; // nothing meaningful to record
+function persistUsage(state: UsageState, nowSec: number, sessionId: string | undefined): void {
+  // Drop stale windows (reset already passed) before doing anything.
+  const five = isStale(state.fiveHour, nowSec) ? null : state.fiveHour;
+  const week = isStale(state.weekly, nowSec) ? null : state.weekly;
+  if (!five && !week) return; // nothing fresh to record
+
   try {
     const dir = join(homedir(), ".claude", "cc-statusline");
     mkdirSync(dir, { recursive: true });
-    const snapshotPath = join(dir, "usage.json");
-    const historyPath = join(dir, "usage.jsonl");
 
-    const win = (w: WindowState | null) =>
-      w == null
-        ? null
-        : {
-            used_percentage: w.used,
-            remaining_percentage: w.remaining,
-            resets_at_epoch: w.resetsAtEpoch,
-            resets_at_raw: w.resetsAtRaw,
-            resets_in_seconds: w.resetsAtEpoch == null ? null : w.resetsAtEpoch - nowSec,
-          };
+    const fiveRec = serializeWindow(five, nowSec);
+    const weekRec = serializeWindow(week, nowSec);
+    const record = {
+      updated_at: nowSec,
+      session_id: sessionId ?? null,
+      five_hour: fiveRec,
+      weekly: weekRec,
+    };
+
+    // 1) Per-session history: append only when this session's numbers change.
+    const safeId = (sessionId ?? "unknown").replace(/[^A-Za-z0-9._-]/g, "_");
+    const historyPath = join(dir, `usage-${safeId}.jsonl`);
+    const prev = lastJsonlRecord(historyPath);
+    const changeKey = JSON.stringify([fiveRec?.used_percentage ?? null, fiveRec?.resets_at_epoch ?? null, weekRec?.used_percentage ?? null, weekRec?.resets_at_epoch ?? null]);
+    const prevKey = prev
+      ? JSON.stringify([prev?.five_hour?.used_percentage ?? null, prev?.five_hour?.resets_at_epoch ?? null, prev?.weekly?.used_percentage ?? null, prev?.weekly?.resets_at_epoch ?? null])
+      : null;
+    if (changeKey !== prevKey) {
+      appendFileSync(historyPath, JSON.stringify(record) + "\n");
+    }
+
+    // 2) Global current snapshot: keep, per window, whichever value has the
+    // newer (larger) reset epoch — favouring the incoming render on ties — and
+    // never let a stale stored window survive.
+    const snapshotPath = join(dir, "usage.json");
+    let stored: any = null;
+    if (existsSync(snapshotPath)) {
+      try {
+        stored = JSON.parse(readFileSync(snapshotPath, "utf8"));
+      } catch {
+        stored = null;
+      }
+    }
+    const mergeWindow = (incoming: WindowRecord, storedWin: any): WindowRecord => {
+      const storedEpoch: number | null = storedWin?.resets_at_epoch ?? null;
+      const storedFresh = storedWin != null && (storedEpoch == null || storedEpoch > nowSec);
+      if (!incoming) return storedFresh ? (storedWin as WindowRecord) : null;
+      if (!storedFresh) return incoming;
+      const incEpoch = incoming.resets_at_epoch;
+      if (incEpoch != null && storedEpoch != null && storedEpoch > incEpoch) {
+        return storedWin as WindowRecord; // stored is on a newer window
+      }
+      return incoming;
+    };
 
     const snapshot = {
       updated_at: nowSec,
-      five_hour: win(state.fiveHour),
-      weekly: win(state.weekly),
+      session_id: sessionId ?? null,
+      five_hour: mergeWindow(fiveRec, stored?.five_hour),
+      weekly: mergeWindow(weekRec, stored?.weekly),
     };
-
-    // Append to history only when the rate-limit values actually changed,
-    // so the high-frequency status-line invocations don't bloat the log.
-    const changeKey = JSON.stringify([
-      state.fiveHour?.used ?? null,
-      state.fiveHour?.resetsAtEpoch ?? null,
-      state.weekly?.used ?? null,
-      state.weekly?.resetsAtEpoch ?? null,
-    ]);
-    let prevKey: string | null = null;
-    if (existsSync(snapshotPath)) {
-      try {
-        const prev = JSON.parse(readFileSync(snapshotPath, "utf8"));
-        prevKey = JSON.stringify([
-          prev?.five_hour?.used_percentage ?? null,
-          prev?.five_hour?.resets_at_epoch ?? null,
-          prev?.weekly?.used_percentage ?? null,
-          prev?.weekly?.resets_at_epoch ?? null,
-        ]);
-      } catch {
-        // Corrupt/old snapshot: treat as changed.
-      }
-    }
-
     const tmp = `${snapshotPath}.tmp`;
     writeFileSync(tmp, JSON.stringify(snapshot));
     renameSync(tmp, snapshotPath);
-
-    if (changeKey !== prevKey) {
-      appendFileSync(historyPath, JSON.stringify(snapshot) + "\n");
-    }
   } catch {
     // Ignore: analytics persistence is best-effort.
   }
@@ -376,7 +430,7 @@ async function main(): Promise<void> {
 
   const nowSec = Math.floor(Date.now() / 1000);
   const usage = readRateLimits(input);
-  persistUsage(usage, nowSec);
+  persistUsage(usage, nowSec, input.session_id);
 
   const segments: string[] = [];
 

@@ -50,10 +50,15 @@ Whenever Claude Code supplies `rate_limits`, each render also writes the quota t
 
 | File | Contents |
 | --- | --- |
-| `~/.claude/cc-statusline/usage.json` | Latest snapshot, overwritten atomically each render. |
-| `~/.claude/cc-statusline/usage.jsonl` | One line appended **only when the numbers change**, so the high-frequency renders don't bloat the log — a clean time series. |
+| `~/.claude/cc-statusline/usage.json` | Global "current" snapshot. Per window the **freshest non-stale value wins**, so a long-idle session can't clobber an active one. Written atomically. |
+| `~/.claude/cc-statusline/usage-<session_id>.jsonl` | Per-session change history — one line appended **only when that session's numbers change**. The durable time series. |
 
-Each record carries `updated_at` plus, per window, `used_percentage`, `remaining_percentage`, `resets_at_epoch`, `resets_at_raw`, and `resets_in_seconds`. Writes are best-effort and never block or crash the status line.
+`rate_limits` is account-global, but Claude Code hands each session the value from *its own* last API response. A long-idle session therefore reports a window that has already reset. Two rules keep the data honest:
+
+- **Stale windows are dropped** — any window whose `resets_at_epoch` is already in the past is neither shown nor persisted.
+- **History is per-session** — keyed by `session_id`, so concurrent sessions never interleave or race on one file.
+
+Each record carries `updated_at`, `session_id`, plus per window `used_percentage`, `remaining_percentage`, `resets_at_epoch`, `resets_at_raw`, and `resets_in_seconds`. For a combined analysis across sessions, `cat ~/.claude/cc-statusline/usage-*.jsonl`. Writes are best-effort and never block or crash the status line.
 
 ### From source
 
