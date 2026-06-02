@@ -357,9 +357,13 @@ function persistUsage(state: UsageState, nowSec: number, sessionId: string | und
       appendFileSync(historyPath, JSON.stringify(record) + "\n");
     }
 
-    // 2) Global current snapshot: keep, per window, whichever value has the
-    // newer (larger) reset epoch — favouring the incoming render on ties — and
-    // never let a stale stored window survive.
+    // 2) Global current snapshot. rate_limits is account-global, so every
+    // active session shares the same window boundary; the most recent non-stale
+    // write is therefore the freshest. So: the incoming non-stale value always
+    // wins. We only fall back to the stored value when this render has no fresh
+    // value for that window — and even then only if the stored one hasn't itself
+    // expired. (Comparing reset epochs to pick a "winner" was wrong: it let a
+    // one-off outlier reset time stick permanently and block real updates.)
     const snapshotPath = join(dir, "usage.json");
     let stored: any = null;
     if (existsSync(snapshotPath)) {
@@ -370,15 +374,10 @@ function persistUsage(state: UsageState, nowSec: number, sessionId: string | und
       }
     }
     const mergeWindow = (incoming: WindowRecord, storedWin: any): WindowRecord => {
+      if (incoming) return incoming; // latest fresh write wins
       const storedEpoch: number | null = storedWin?.resets_at_epoch ?? null;
       const storedFresh = storedWin != null && (storedEpoch == null || storedEpoch > nowSec);
-      if (!incoming) return storedFresh ? (storedWin as WindowRecord) : null;
-      if (!storedFresh) return incoming;
-      const incEpoch = incoming.resets_at_epoch;
-      if (incEpoch != null && storedEpoch != null && storedEpoch > incEpoch) {
-        return storedWin as WindowRecord; // stored is on a newer window
-      }
-      return incoming;
+      return storedFresh ? (storedWin as WindowRecord) : null;
     };
 
     const snapshot = {
