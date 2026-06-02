@@ -1,9 +1,9 @@
 # claude-statusline
 
-Minimal Claude Code status line. No pets, no leaderboards, no sync. Five segments:
+Minimal Claude Code status line. No pets, no leaderboards, no sync:
 
 ```
-Opus 4.7 │ Ctx 318.5K (31.9% / u 39.8%) │ $26.45 (1h0m) │ +12 -4 │ main ±3
+Opus 4.7 │ Ctx 318.5K (31.9% / u 39.8%) │ $26.45 (1h0m) │ +12 -4 │ 5h 66% (2h37m) · wk 93% (3d7h) │ main ±3
 ```
 
 | Segment | Source |
@@ -12,9 +12,10 @@ Opus 4.7 │ Ctx 318.5K (31.9% / u 39.8%) │ $26.45 (1h0m) │ +12 -4 │ main 
 | Context | tail-scan of `transcript_path` jsonl; `%` computed against a per-model window table — Opus 4.6/4.7 and Sonnet 4.6 = 1M, Haiku 4.5 = 200K, family fallback otherwise. `u` is against 80% of the window (compaction-relevant). |
 | Cost + duration | stdin `cost.total_cost_usd` and `cost.total_duration_ms` (Claude Code's own numbers, not estimated) |
 | Edits | stdin `cost.total_lines_added` / `total_lines_removed` |
+| Usage quota | stdin `rate_limits`; `5h` = 5-hour rolling window, `wk` = 7-day window. Shows **remaining** % (`100 − used_percentage`) and time-to-reset in parens. Only present for Claude.ai Pro/Max, and only after the session's first API response — hidden otherwise. |
 | Git | branch via `git rev-parse --abbrev-ref HEAD`; `±N` = dirty file count, `✓` = clean |
 
-Color thresholds on the `Ctx` value: green < 50% (usable), cyan < 80%, yellow < 95%, red otherwise.
+Color thresholds on the `Ctx` value: green < 50% (usable), cyan < 80%, yellow < 95%, red otherwise. On the quota %: green > 20% remaining, yellow ≤ 20%, red ≤ 5%.
 
 ## Why this exists
 
@@ -33,12 +34,26 @@ Then point `~/.claude/settings.json` at the `cc-statusline` command:
   "statusLine": {
     "type": "command",
     "command": "cc-statusline",
-    "padding": 0
+    "padding": 0,
+    "refreshInterval": 60
   }
 }
 ```
 
 Restart Claude Code (or open a new session) for the status line to appear.
+
+`refreshInterval` (seconds) re-runs the command on a timer in addition to the event-driven updates, so the usage-quota countdown stays current while the session is idle. Drop it if you don't show the quota segment.
+
+## Usage-quota persistence
+
+Whenever Claude Code supplies `rate_limits`, each render also writes the quota to disk so you can analyze it outside the status line:
+
+| File | Contents |
+| --- | --- |
+| `~/.claude/cc-statusline/usage.json` | Latest snapshot, overwritten atomically each render. |
+| `~/.claude/cc-statusline/usage.jsonl` | One line appended **only when the numbers change**, so the high-frequency renders don't bloat the log — a clean time series. |
+
+Each record carries `updated_at` plus, per window, `used_percentage`, `remaining_percentage`, `resets_at_epoch`, `resets_at_raw`, and `resets_in_seconds`. Writes are best-effort and never block or crash the status line.
 
 ### From source
 

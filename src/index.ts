@@ -1,5 +1,15 @@
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Claude Code statusLine input (passed via stdin as a JSON object).
@@ -16,6 +26,21 @@ interface StatusInput {
     total_lines_added?: number;
     total_lines_removed?: number;
   };
+  // Present only for Claude.ai Pro/Max subscribers, and only after the first
+  // API response of the session. Each window may be independently absent.
+  // Field naming has varied across versions, so we accept both variants.
+  rate_limits?: {
+    five_hour?: RateWindow;
+    session?: RateWindow;
+    seven_day?: RateWindow;
+    weekly?: RateWindow;
+  };
+}
+
+interface RateWindow {
+  used_percentage?: number;
+  // Epoch seconds in current versions; tolerate ISO8601 strings just in case.
+  resets_at?: number | string;
 }
 
 interface TranscriptEntry {
@@ -173,6 +198,149 @@ function ctxColor(pct: number): string {
   return C.green;
 }
 
+// Normalized per-window usage snapshot used for both display and persistence.
+interface WindowState {
+  used: number | null; // percentage 0-100
+  remaining: number | null; // 100 - used
+  resetsAtEpoch: number | null; // unix seconds
+  resetsAtRaw: number | string | null; // original value as received
+}
+
+function toEpochSeconds(v: number | string | undefined): number | null {
+  if (v == null) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? Math.floor(v) : null;
+  const s = v.trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  const ms = Date.parse(s);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function normalizeWindow(w: RateWindow | undefined): WindowState | null {
+  if (!w) return null;
+  const used = typeof w.used_percentage === "number" && Number.isFinite(w.used_percentage)
+    ? w.used_percentage
+    : null;
+  const resetsAtEpoch = toEpochSeconds(w.resets_at);
+  // A window with no usable data at all is treated as absent.
+  if (used == null && resetsAtEpoch == null) return null;
+  return {
+    used,
+    remaining: used == null ? null : Math.max(0, 100 - used),
+    resetsAtEpoch,
+    resetsAtRaw: w.resets_at ?? null,
+  };
+}
+
+interface UsageState {
+  fiveHour: WindowState | null;
+  weekly: WindowState | null;
+}
+
+function readRateLimits(input: StatusInput): UsageState {
+  const rl = input.rate_limits;
+  return {
+    fiveHour: normalizeWindow(rl?.five_hour ?? rl?.session),
+    weekly: normalizeWindow(rl?.seven_day ?? rl?.weekly),
+  };
+}
+
+// Compact "time until reset" from now, e.g. 45m, 2h13m, 3d4h.
+function formatResetIn(epochSeconds: number | null, nowSec: number): string {
+  if (epochSeconds == null) return "";
+  let s = epochSeconds - nowSec;
+  if (s <= 0) return "now";
+  const d = Math.floor(s / 86400);
+  s -= d * 86400;
+  const h = Math.floor(s / 3600);
+  s -= h * 3600;
+  const m = Math.floor(s / 60);
+  if (d > 0) return `${d}d${h}h`;
+  if (h > 0) return `${h}h${m}m`;
+  return `${m}m`;
+}
+
+// Lower remaining quota => more urgent color.
+function quotaColor(remaining: number | null): string {
+  if (remaining == null) return C.cyan;
+  if (remaining <= 5) return C.red;
+  if (remaining <= 20) return C.yellow;
+  return C.green;
+}
+
+function formatWindowSegment(label: string, w: WindowState | null, nowSec: number): string | null {
+  if (!w) return null;
+  const col = quotaColor(w.remaining);
+  const pct = w.remaining == null ? "?" : `${w.remaining.toFixed(0)}%`;
+  const reset = formatResetIn(w.resetsAtEpoch, nowSec);
+  const tail = reset ? ` ${C.dim}(${reset})${C.reset}` : "";
+  return `${C.dim}${label}${C.reset} ${col}${pct}${C.reset}${tail}`;
+}
+
+// Persist usage so it can be analyzed outside the status line.
+//   <dir>/usage.json  — latest snapshot (overwritten atomically each run)
+//   <dir>/usage.jsonl — one line appended only when the numbers change
+// Never throws: persistence must not break the status line.
+function persistUsage(state: UsageState, nowSec: number): void {
+  if (!state.fiveHour && !state.weekly) return; // nothing meaningful to record
+  try {
+    const dir = join(homedir(), ".claude", "cc-statusline");
+    mkdirSync(dir, { recursive: true });
+    const snapshotPath = join(dir, "usage.json");
+    const historyPath = join(dir, "usage.jsonl");
+
+    const win = (w: WindowState | null) =>
+      w == null
+        ? null
+        : {
+            used_percentage: w.used,
+            remaining_percentage: w.remaining,
+            resets_at_epoch: w.resetsAtEpoch,
+            resets_at_raw: w.resetsAtRaw,
+            resets_in_seconds: w.resetsAtEpoch == null ? null : w.resetsAtEpoch - nowSec,
+          };
+
+    const snapshot = {
+      updated_at: nowSec,
+      five_hour: win(state.fiveHour),
+      weekly: win(state.weekly),
+    };
+
+    // Append to history only when the rate-limit values actually changed,
+    // so the high-frequency status-line invocations don't bloat the log.
+    const changeKey = JSON.stringify([
+      state.fiveHour?.used ?? null,
+      state.fiveHour?.resetsAtEpoch ?? null,
+      state.weekly?.used ?? null,
+      state.weekly?.resetsAtEpoch ?? null,
+    ]);
+    let prevKey: string | null = null;
+    if (existsSync(snapshotPath)) {
+      try {
+        const prev = JSON.parse(readFileSync(snapshotPath, "utf8"));
+        prevKey = JSON.stringify([
+          prev?.five_hour?.used_percentage ?? null,
+          prev?.five_hour?.resets_at_epoch ?? null,
+          prev?.weekly?.used_percentage ?? null,
+          prev?.weekly?.resets_at_epoch ?? null,
+        ]);
+      } catch {
+        // Corrupt/old snapshot: treat as changed.
+      }
+    }
+
+    const tmp = `${snapshotPath}.tmp`;
+    writeFileSync(tmp, JSON.stringify(snapshot));
+    renameSync(tmp, snapshotPath);
+
+    if (changeKey !== prevKey) {
+      appendFileSync(historyPath, JSON.stringify(snapshot) + "\n");
+    }
+  } catch {
+    // Ignore: analytics persistence is best-effort.
+  }
+}
+
 function readStdinSync(): string {
   try {
     return readFileSync(0, "utf8");
@@ -206,6 +374,10 @@ async function main(): Promise<void> {
   const gitCwd = input.workspace?.current_dir ?? input.cwd;
   const git = readGitState(gitCwd);
 
+  const nowSec = Math.floor(Date.now() / 1000);
+  const usage = readRateLimits(input);
+  persistUsage(usage, nowSec);
+
   const segments: string[] = [];
 
   // Model
@@ -225,6 +397,15 @@ async function main(): Promise<void> {
   // Edits in this session
   if (added > 0 || removed > 0) {
     segments.push(`${C.green}+${added}${C.reset} ${C.red}-${removed}${C.reset}`);
+  }
+
+  // Usage quota: 5h + weekly remaining %, with time-to-reset.
+  // Shown only when Claude Code supplies rate_limits (Pro/Max, post first response).
+  const fiveSeg = formatWindowSegment("5h", usage.fiveHour, nowSec);
+  const weekSeg = formatWindowSegment("wk", usage.weekly, nowSec);
+  const quotaParts = [fiveSeg, weekSeg].filter((s): s is string => s != null);
+  if (quotaParts.length > 0) {
+    segments.push(quotaParts.join(`${C.dim} · ${C.reset}`));
   }
 
   // Git
