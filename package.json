@@ -1,6 +1,6 @@
 {
   "name": "cc-statusline-simple",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Minimal Claude Code status line: model-aware context %, cost, git status. No pets.",
   "keywords": [
     "claude",
