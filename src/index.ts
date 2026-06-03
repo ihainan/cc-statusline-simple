@@ -357,13 +357,16 @@ function persistUsage(state: UsageState, nowSec: number, sessionId: string | und
       appendFileSync(historyPath, JSON.stringify(record) + "\n");
     }
 
-    // 2) Global current snapshot. rate_limits is account-global, so every
-    // active session shares the same window boundary; the most recent non-stale
-    // write is therefore the freshest. So: the incoming non-stale value always
-    // wins. We only fall back to the stored value when this render has no fresh
-    // value for that window — and even then only if the stored one hasn't itself
-    // expired. (Comparing reset epochs to pick a "winner" was wrong: it let a
-    // one-off outlier reset time stick permanently and block real updates.)
+    // 2) Global current snapshot. rate_limits is account-global and, within a
+    // single window, used_percentage only ever grows (usage accumulates until the
+    // window resets). But each session reports rate_limits as of ITS OWN last API
+    // response, so an idle session re-rendering its status line would otherwise
+    // clobber an active session's higher (truer) value with a stale-but-not-yet-
+    // expired low one — making the snapshot flap between sessions.
+    // Rule: per window keep the MAXIMUM used_percentage; advance (reset to a lower
+    // value) only when a genuinely newer window starts, detected by a later reset
+    // epoch. Reset epochs are compared solely to spot that boundary — never to pick
+    // a "winner" by reset time, which previously let an outlier reset stick.
     const snapshotPath = join(dir, "usage.json");
     let stored: any = null;
     if (existsSync(snapshotPath)) {
@@ -374,10 +377,29 @@ function persistUsage(state: UsageState, nowSec: number, sessionId: string | und
       }
     }
     const mergeWindow = (incoming: WindowRecord, storedWin: any): WindowRecord => {
-      if (incoming) return incoming; // latest fresh write wins
       const storedEpoch: number | null = storedWin?.resets_at_epoch ?? null;
       const storedFresh = storedWin != null && (storedEpoch == null || storedEpoch > nowSec);
-      return storedFresh ? (storedWin as WindowRecord) : null;
+      const storedRec: WindowRecord = storedFresh ? (storedWin as WindowRecord) : null;
+      if (!incoming) return storedRec; // no fresh value this render — keep stored if usable
+      if (!storedRec) return incoming; // nothing usable stored — take incoming
+      const incEpoch = incoming.resets_at_epoch ?? null;
+      const stEpoch = storedRec.resets_at_epoch ?? null;
+      if (incEpoch != null && stEpoch != null) {
+        if (incEpoch > stEpoch) return incoming; // new window started — reset to incoming
+        if (incEpoch < stEpoch) return storedRec; // incoming is from an older window
+      }
+      // Same window (or epoch unknown): keep the higher used_percentage, but take
+      // the incoming reset countdown so resets_in_seconds stays fresh.
+      const incUsed = incoming.used_percentage ?? -1;
+      const stUsed = storedRec.used_percentage ?? -1;
+      if (stUsed > incUsed) {
+        return {
+          ...incoming,
+          used_percentage: storedRec.used_percentage,
+          remaining_percentage: storedRec.remaining_percentage,
+        };
+      }
+      return incoming;
     };
 
     const snapshot = {

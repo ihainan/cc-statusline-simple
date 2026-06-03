@@ -11,13 +11,19 @@
   ],
   "license": "MIT",
   "author": "ihainan",
-  "repository": "github:ihainan/cc-statusline",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ihainan/cc-statusline.git"
+  },
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
     "cc-statusline": "dist/cli.js"
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/cli.js --minify --banner:js=\"#!/usr/bin/env node\"",
     "watch": "npm run build -- --watch",
