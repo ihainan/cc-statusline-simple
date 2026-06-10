@@ -392,6 +392,17 @@ function persistUsage(state: UsageState, nowSec: number, sessionId: string | und
       // the incoming reset countdown so resets_in_seconds stays fresh.
       const incUsed = incoming.used_percentage ?? -1;
       const stUsed = storedRec.used_percentage ?? -1;
+      // Within a window usage only ever grows, and idle sessions don't re-render
+      // (so every write comes from an active session reporting the current
+      // account-global value). A *large* drop at the same epoch therefore isn't
+      // idle-clobber jitter — it's Anthropic resetting the quota mid-window
+      // (e.g. an official goodwill reset). Accept it so the new low value isn't
+      // masked by the stale pre-reset max. The threshold stays well above the
+      // few-point skew between concurrent active sessions, which keep-max absorbs.
+      const RESET_DROP = 5;
+      if (incUsed >= 0 && stUsed - incUsed >= RESET_DROP) {
+        return incoming; // mid-window reset detected — take the fresh low value
+      }
       if (stUsed > incUsed) {
         return {
           ...incoming,
