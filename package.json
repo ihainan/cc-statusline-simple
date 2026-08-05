@@ -27,7 +27,8 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/cli.js --minify --banner:js=\"#!/usr/bin/env node\"",
     "watch": "npm run build -- --watch",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",
