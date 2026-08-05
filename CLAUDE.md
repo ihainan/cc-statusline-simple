@@ -64,13 +64,30 @@ npm view cc-statusline-simple version   # confirm the registry updated
 
 ## Global install (local dev)
 
-The status line is installed globally and invoked by Claude Code per render
-(`statusLine.command: "cc-statusline"` in `~/.claude/settings.json`). After
-editing source, propagate to the live status line with:
+The status line is invoked by Claude Code once per render
+(`statusLine.command: "cc-statusline"` in `~/.claude/settings.json`).
 
-```bash
-npm run build && npm install -g .
+On this machine the global install is a **symlink into this repo**, not a copy:
+
+```
+<npm prefix>/lib/node_modules/cc-statusline-simple -> <this repo>
+<npm prefix>/bin/cc-statusline -> .../cc-statusline-simple/dist/cli.js
 ```
 
-A plain `npm run build` updates this repo's `dist/` but NOT the global install —
-they are separate copies.
+So `npm run build` alone propagates to the live status line — no `npm install -g .`
+needed (it just reports "up to date"). Verify a change took effect with:
+
+```bash
+echo '{"model":{"display_name":"Opus 5"},"effort":{"level":"high"}}' | cc-statusline
+```
+
+**The exec bit on `dist/cli.js` matters.** Claude Code runs the file directly, so
+if it loses `+x` the status line silently disappears (the command exits 126,
+`permission denied`). This happened once: `dist/cli.js` was deleted and rebuilt,
+and the fresh esbuild output was mode 644. `npm run build` now ends with
+`chmod +x dist/cli.js` to keep that from recurring. If the status line ever goes
+blank, check this first:
+
+```bash
+ls -l dist/cli.js        # want -rwxr-xr-x
+```
