@@ -42,6 +42,7 @@ const cases = [
       transcript_path: transcript,
       cwd: process.cwd(),
       model: { id: "claude-opus-4-7", display_name: "Opus 4.7" },
+      effort: { level: "high" },
       workspace: { current_dir: process.cwd() },
       cost: {
         total_cost_usd: 26.45,
@@ -70,6 +71,23 @@ const cases = [
     },
   },
   {
+    name: "Effort levels — low / medium / xhigh / max / unknown",
+    payload: {
+      transcript_path: transcript,
+      cwd: process.cwd(),
+      model: { id: "claude-opus-5", display_name: "Opus 5 (1M context)" },
+      effort: { level: "max" },
+      cost: { total_cost_usd: 1.5 },
+    },
+    extra: ["low", "medium", "xhigh", "weird"].map((level) => ({
+      transcript_path: transcript,
+      cwd: process.cwd(),
+      model: { id: "claude-opus-5", display_name: "Opus 5 (1M context)" },
+      effort: { level },
+      cost: { total_cost_usd: 1.5 },
+    })),
+  },
+  {
     name: "Missing model, missing transcript",
     payload: {
       cwd: process.cwd(),
@@ -81,18 +99,20 @@ const cases = [
 const cli = join(import.meta.dirname, "..", "dist", "cli.js");
 let failures = 0;
 for (const c of cases) {
-  const res = spawnSync("node", [cli], {
-    input: JSON.stringify(c.payload),
-    encoding: "utf8",
-  });
-  if (res.status !== 0) {
-    console.error(`FAIL ${c.name}: exit=${res.status}`);
-    console.error(res.stderr);
-    failures++;
-    continue;
-  }
   console.log(`# ${c.name}`);
-  console.log(res.stdout);
+  for (const payload of [c.payload, ...(c.extra ?? [])]) {
+    const res = spawnSync("node", [cli], {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+    });
+    if (res.status !== 0) {
+      console.error(`FAIL ${c.name}: exit=${res.status}`);
+      console.error(res.stderr);
+      failures++;
+      continue;
+    }
+    console.log(res.stdout);
+  }
   console.log();
 }
 process.exit(failures > 0 ? 1 : 0);

@@ -20,6 +20,9 @@ interface StatusInput {
   transcript_path?: string;
   cwd?: string;
   model?: { id?: string; display_name?: string };
+  // Present only for models that support reasoning effort (Opus 4.6+, Sonnet
+  // 4.6+, ...). Level is one of low/medium/high/xhigh/max.
+  effort?: { level?: string };
   workspace?: { current_dir?: string; project_dir?: string };
   cost?: {
     total_cost_usd?: number;
@@ -191,6 +194,27 @@ const C = {
   cyan: "\x1b[36m",
   brightBlue: "\x1b[94m",
 };
+
+// Reasoning effort, abbreviated so it costs at most 2-4 columns next to the
+// model name instead of a whole segment of its own.
+const EFFORT_ABBR: Record<string, string> = {
+  low: "L",
+  medium: "M",
+  high: "H",
+  xhigh: "XH",
+  max: "MAX",
+};
+
+function formatEffort(effort: StatusInput["effort"]): string {
+  const level = effort?.level?.trim().toLowerCase();
+  if (!level) return "";
+  const abbr = EFFORT_ABBR[level] ?? level.toUpperCase();
+  // Loud colour for the expensive tiers, quiet for the cheap ones, so a glance
+  // says how hard the model is currently thinking.
+  const color =
+    level === "xhigh" || level === "max" ? C.yellow : level === "high" ? C.magenta : C.dim;
+  return `${C.dim}·${C.reset}${color}${abbr}${C.reset}`;
+}
 
 function ctxColor(pct: number): string {
   if (pct >= 95) return C.red;
@@ -466,8 +490,8 @@ async function main(): Promise<void> {
 
   const segments: string[] = [];
 
-  // Model
-  segments.push(`${C.bold}${C.magenta}${model}${C.reset}`);
+  // Model (+ reasoning effort, when the model supports it)
+  segments.push(`${C.bold}${C.magenta}${model}${C.reset}${formatEffort(input.effort)}`);
 
   // Context: absolute + total% + usable%
   const ctxColr = ctxColor(pctUsable);
